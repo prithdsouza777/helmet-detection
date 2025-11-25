@@ -1,7 +1,7 @@
 "use client"
 
 import { useRef, useEffect, useState } from "react"
-import { AlertCircle } from "lucide-react"
+import { AlertCircle, Loader2 } from "lucide-react"
 
 interface Detection {
   x1: number
@@ -14,24 +14,75 @@ interface Detection {
 
 interface VideoFeedProps {
   isRunning: boolean
-  detections: Detection[]
-  onDetectionsUpdate: (detections: Detection[]) => void
   confidenceThreshold: number
   backendUrl: string
 }
 
-export default function VideoFeed({
-  isRunning,
-  detections,
-  onDetectionsUpdate,
-  confidenceThreshold,
-  backendUrl,
-}: VideoFeedProps) {
+export default function VideoFeed({ isRunning, confidenceThreshold, backendUrl }: VideoFeedProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  const audioContextRef = useRef<AudioContext | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [hasPermission, setHasPermission] = useState(false)
+  const [backendStatus, setBackendStatus] = useState<"checking" | "ok" | "error">("checking")
+  const [helmetDetected, setHelmetDetected] = useState(true)
+  const [detections, setDetections] = useState<Detection[]>([])
   const frameIntervalRef = useRef<NodeJS.Timeout | null>(null)
+  const beepIntervalRef = useRef<NodeJS.Timeout | null>(null)
+
+  const playBeep = () => {
+    try {
+      if (!audioContextRef.current) {
+        audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)()
+      }
+
+      const ctx = audioContextRef.current
+      const oscillator = ctx.createOscillator()
+      const gainNode = ctx.createGain()
+
+      oscillator.connect(gainNode)
+      gainNode.connect(ctx.destination)
+
+      oscillator.frequency.value = 800
+      oscillator.type = "sine"
+
+      gainNode.gain.setValueAtTime(0.3, ctx.currentTime)
+      gainNode.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.1)
+
+      oscillator.start(ctx.currentTime)
+      oscillator.stop(ctx.currentTime + 0.1)
+    } catch (err) {
+      console.error("[v0] Beep error:", err)
+    }
+  }
+
+  useEffect(() => {
+    const checkBackendHealth = async () => {
+      try {
+        setBackendStatus("checking")
+        const response = await fetch(`${backendUrl}/health`, {
+          method: "GET",
+        })
+        if (response.ok) {
+          setBackendStatus("ok")
+          setError(null)
+        } else {
+          setBackendStatus("error")
+          setError("Backend returned an error. Check console for details.")
+        }
+      } catch (err) {
+        setBackendStatus("error")
+        setError(`Cannot connect to backend at ${backendUrl}. Make sure Flask is running.`)
+        console.error("[v0] Backend health check failed:", err)
+      }
+    }
+
+    if (isRunning) {
+      checkBackendHealth()
+      const healthInterval = setInterval(checkBackendHealth, 5000)
+      return () => clearInterval(healthInterval)
+    }
+  }, [isRunning, backendUrl])
 
   useEffect(() => {
     if (!isRunning) return
@@ -63,14 +114,31 @@ export default function VideoFeed({
   }, [isRunning])
 
   useEffect(() => {
-    if (!hasPermission || !videoRef.current || !isRunning) return
+    if (!helmetDetected && isRunning) {
+      beepIntervalRef.current = setInterval(() => {
+        playBeep()
+      }, 500)
+    } else {
+      if (beepIntervalRef.current) {
+        clearInterval(beepIntervalRef.current)
+      }
+    }
+
+    return () => {
+      if (beepIntervalRef.current) {
+        clearInterval(beepIntervalRef.current)
+      }
+    }
+  }, [helmetDetected, isRunning])
+
+  useEffect(() => {
+    if (!hasPermission || !videoRef.current || !isRunning || backendStatus !== "ok") return
 
     const captureAndSendFrame = async () => {
       const video = videoRef.current
       if (!video || video.readyState !== video.HAVE_ENOUGH_DATA) return
 
       try {
-        // Create temporary canvas to capture frame
         const tempCanvas = document.createElement("canvas")
         tempCanvas.width = video.videoWidth
         tempCanvas.height = video.videoHeight
@@ -79,7 +147,6 @@ export default function VideoFeed({
 
         ctx.drawImage(video, 0, 0)
 
-        // Convert to blob and send to backend
         tempCanvas.toBlob(
           async (blob) => {
             if (!blob) return
@@ -94,12 +161,20 @@ export default function VideoFeed({
                 body: formData,
               })
 
-              if (!response.ok) throw new Error("Backend error")
+              if (!response.ok) {
+                const errorData = await response.json().catch(() => ({}))
+                throw new Error(errorData.error || `Backend error: ${response.status}`)
+              }
 
               const data = await response.json()
-              onDetectionsUpdate(data.detections || [])
+              const newDetections = data.detections || []
+              setDetections(newDetections)
+
+              const hasHelmet = newDetections.some((d: Detection) => d.label === "helmet")
+              setHelmetDetected(hasHelmet)
             } catch (err) {
               console.error("[v0] Backend error:", err)
+              setError(`Backend error: ${err instanceof Error ? err.message : "Unknown error"}`)
             }
           },
           "image/jpeg",
@@ -110,13 +185,12 @@ export default function VideoFeed({
       }
     }
 
-    // Send frames every 100ms (10 FPS)
     frameIntervalRef.current = setInterval(captureAndSendFrame, 100)
 
     return () => {
       if (frameIntervalRef.current) clearInterval(frameIntervalRef.current)
     }
-  }, [hasPermission, isRunning, confidenceThreshold, backendUrl, onDetectionsUpdate])
+  }, [hasPermission, isRunning, confidenceThreshold, backendUrl, backendStatus])
 
   useEffect(() => {
     if (!hasPermission || !canvasRef.current || !videoRef.current) return
@@ -135,18 +209,15 @@ export default function VideoFeed({
       canvas.width = video.videoWidth
       canvas.height = video.videoHeight
 
-      // Draw detections
       detections.forEach((detection) => {
         const { x1, y1, x2, y2, label, confidence } = detection
         const isHelmet = label === "helmet"
         const color = isHelmet ? "#22c55e" : "#ef4444"
 
-        // Draw bounding box
         ctx.strokeStyle = color
         ctx.lineWidth = 2
         ctx.strokeRect(x1, y1, x2 - x1, y2 - y1)
 
-        // Draw label background
         const labelText = `${label} ${(confidence * 100).toFixed(1)}%`
         ctx.font = "bold 14px Arial"
         const textMetrics = ctx.measureText(labelText)
@@ -155,7 +226,6 @@ export default function VideoFeed({
         ctx.fillStyle = color
         ctx.fillRect(x1, y1 - textHeight, textMetrics.width + 8, textHeight)
 
-        // Draw label text
         ctx.fillStyle = "#000"
         ctx.fillText(labelText, x1 + 4, y1 - 5)
       })
@@ -170,9 +240,29 @@ export default function VideoFeed({
     <div className="relative bg-black aspect-video flex items-center justify-center">
       {error && (
         <div className="absolute inset-0 flex items-center justify-center bg-black/80 z-10">
-          <div className="text-center">
+          <div className="text-center max-w-sm px-4">
             <AlertCircle className="w-12 h-12 text-red-500 mx-auto mb-4" />
-            <p className="text-white">{error}</p>
+            <p className="text-white font-semibold mb-2">Error</p>
+            <p className="text-white/80 text-sm">{error}</p>
+            <p className="text-white/60 text-xs mt-4">Check the browser console for more details</p>
+          </div>
+        </div>
+      )}
+
+      {backendStatus === "checking" && isRunning && (
+        <div className="absolute inset-0 flex items-center justify-center bg-black/50 z-10">
+          <div className="text-center">
+            <Loader2 className="w-8 h-8 text-blue-500 mx-auto mb-2 animate-spin" />
+            <p className="text-white text-sm">Connecting to backend...</p>
+          </div>
+        </div>
+      )}
+
+      {!helmetDetected && isRunning && (
+        <div className="absolute inset-0 flex items-center justify-center z-20 pointer-events-none">
+          <div className="bg-red-600 text-white px-8 py-6 rounded-lg text-center animate-pulse">
+            <p className="text-4xl font-bold">⚠️ PLEASE WEAR A HELMET</p>
+            <p className="text-lg mt-2">Safety Alert - Helmet Not Detected</p>
           </div>
         </div>
       )}

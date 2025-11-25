@@ -3,38 +3,12 @@
 import { useState } from "react"
 import { Card } from "@/components/ui/card"
 import VideoFeed from "@/components/video-feed"
-import DetectionStats from "@/components/detection-stats"
 import ControlPanel from "@/components/control-panel"
 
 export default function Home() {
   const [isRunning, setIsRunning] = useState(false)
-  const [detections, setDetections] = useState<any[]>([])
   const [confidenceThreshold, setConfidenceThreshold] = useState(75)
   const [backendUrl, setBackendUrl] = useState("http://localhost:5000")
-  const [stats, setStats] = useState({
-    helmetCount: 0,
-    noHelmetCount: 0,
-    totalDetections: 0,
-    avgConfidence: 0,
-  })
-
-  const handleDetectionsUpdate = (newDetections: any[]) => {
-    setDetections(newDetections)
-
-    const helmetCount = newDetections.filter((d) => d.label === "helmet").length
-    const noHelmetCount = newDetections.filter((d) => d.label === "no_helmet").length
-    const avgConfidence =
-      newDetections.length > 0
-        ? ((newDetections.reduce((sum, d) => sum + d.confidence, 0) / newDetections.length) * 100).toFixed(1)
-        : 0
-
-    setStats({
-      helmetCount,
-      noHelmetCount,
-      totalDetections: newDetections.length,
-      avgConfidence: Number.parseFloat(avgConfidence as string),
-    })
-  }
 
   return (
     <main className="min-h-screen bg-background text-foreground">
@@ -54,22 +28,14 @@ export default function Home() {
       </div>
 
       <div className="max-w-7xl mx-auto px-4 py-8">
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          <div className="lg:col-span-2">
+        <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
+          <div className="lg:col-span-3">
             <Card className="overflow-hidden">
-              <VideoFeed
-                isRunning={isRunning}
-                detections={detections}
-                onDetectionsUpdate={handleDetectionsUpdate}
-                confidenceThreshold={confidenceThreshold}
-                backendUrl={backendUrl}
-              />
+              <VideoFeed isRunning={isRunning} confidenceThreshold={confidenceThreshold} backendUrl={backendUrl} />
             </Card>
           </div>
 
-          <div className="space-y-6">
-            <DetectionStats stats={stats} />
-
+          <div>
             <ControlPanel
               isRunning={isRunning}
               onToggle={() => setIsRunning(!isRunning)}
